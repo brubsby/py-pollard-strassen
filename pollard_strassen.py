@@ -3,6 +3,29 @@ import math
 import argparse
 from flint import fmpz_mod_poly_ctx, fmpz
 
+def parse_memory_limit(mem_str):
+    """
+    Parses a memory string (e.g., '1GB', '500M') into bytes.
+    """
+    if not mem_str:
+        return None
+    
+    mem_str = mem_str.upper().strip()
+    units = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    
+    multiplier = 1
+    for unit, value in units.items():
+        if mem_str.endswith(unit) or mem_str.endswith(unit + "B"):
+            multiplier = value
+            # Remove unit suffix
+            mem_str = mem_str.rstrip("B").rstrip(unit)
+            break
+            
+    try:
+        return int(float(mem_str) * multiplier)
+    except ValueError:
+        raise ValueError(f"Invalid memory format: {mem_str}")
+
 def product_tree(leaves):
     """
     Computes the product of polynomial leaves using a tree structure.
@@ -23,40 +46,63 @@ def product_tree(leaves):
     
     return left * right
 
-def pollard_strassen(N, B=None):
+def pollard_strassen(N, B=None, max_memory=None):
     """
     Factors N using Pollard-Strassen algorithm.
     Finds a factor p <= B (if B is given) or p <= N^(1/2).
+    Respects max_memory if provided.
     """
     # Convert N to fmpz string for safety if it's huge
     N_val = fmpz(str(N))
+    N_int = int(N_val)
     
     print(f"Factoring N = {N_val}")
 
+    # Determine initial target L
     if B:
         print(f"User specified bound B = {B}")
-        # L = ceil(sqrt(B))
-        # Search range is roughly [1, L^2] which covers B if L^2 >= B
         sqrt_B = math.isqrt(int(B))
         if sqrt_B * sqrt_B < int(B):
             sqrt_B += 1
         L = int(sqrt_B)
-        print(f"Set L (step size) = {L} based on bound {B}")
+        target_source = "bound"
     else:
-        # 1. Determine L = ceil(N^(1/4))
-        # For huge numbers, math.isqrt might take int.
+        # Default: N^(1/4)
         try:
-            sqrt_N = math.isqrt(int(N_val))
+            sqrt_N = math.isqrt(N_int)
         except OverflowError:
-            # Fallback for extremely large numbers if standard int fails (unlikely in Py3)
-            sqrt_N = int(N_val) // (10**(len(str(N_val))//2)) # Rough approx or use flint sqrt?
-            # Flint fmpz has integer sqrt
             sqrt_N = int(N_val.isqrt())
-            
         root_4_N = math.isqrt(sqrt_N)
         L = int(root_4_N + 1)
+        target_source = "default N^(1/4)"
+
+    # Apply Memory Constraints
+    if max_memory:
+        # Heuristic: 
+        # Base Python/FLINT overhead is approx 20-25MB.
+        # Per-leaf cost is approx 3.1-3.4KB (scaling factor 8x).
+        FIXED_OVERHEAD = 25 * 1024 * 1024 # 25 MB
         
-        print(f"Calculated L (step size) = {L} based on N^(1/4)")
+        available_memory = max_memory - FIXED_OVERHEAD
+        if available_memory <= 0:
+            print(f"Warning: Memory limit {max_memory} is too low for Python overhead (~25MB).")
+            print("Setting minimal L=1000. Expect memory usage > limit.")
+            L_mem_limit = 1000
+        else:
+            N_bytes = N_int.bit_length() // 8
+            base_cost = 256 + (4 * N_bytes)
+            cost_per_L = base_cost * 8
+            L_mem_limit = int(available_memory // cost_per_L)
+            
+        print(f"Memory limit {max_memory} bytes (usable: {max(0, available_memory)}) implies max L approx {L_mem_limit}")
+        
+        if L > L_mem_limit:
+            print(f"Reducing L from {L} ({target_source}) to {L_mem_limit} to fit in memory.")
+            L = L_mem_limit
+        else:
+            print(f"Memory limit allows L up to {L_mem_limit}. Current L={L} is safe.")
+            
+    print(f"Final L (step size) = {L}")
     
     # Safety check for very small N
     if N_val <= 1000:
@@ -166,6 +212,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Factor large integers using Pollard-Strassen.")
     parser.add_argument("N", type=str, help="The integer to factor")
     parser.add_argument("--bound", "-B", type=str, help="Search for factors up to this bound (e.g., 1000000)")
+    parser.add_argument("--max-memory", "-M", type=str, help="Approximate max memory usage (e.g., '1GB', '512MB')")
     
     args = parser.parse_args()
     
@@ -178,7 +225,11 @@ if __name__ == "__main__":
         if args.bound:
             bound = int(args.bound)
             
-        result = pollard_strassen(target, B=bound)
+        max_mem_bytes = None
+        if args.max_memory:
+            max_mem_bytes = parse_memory_limit(args.max_memory)
+            
+        result = pollard_strassen(target, B=bound, max_memory=max_mem_bytes)
         
         if result:
             print(f"Found factor: {result}")
@@ -186,5 +237,8 @@ if __name__ == "__main__":
         else:
             print("No factor found within the search range.")
             
-    except ValueError as e:
-        print(f"Error: {e}")
+        except ValueError as e:
+            print(f"Error: {e}")        
+    # Report Peak Memory
+    usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print(f"Peak Memory Usage: {usage_kb / 1024:.2f} MB")
