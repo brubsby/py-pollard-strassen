@@ -1,6 +1,8 @@
 import sys
 import math
 import argparse
+import resource
+import psutil
 from flint import fmpz_mod_poly_ctx, fmpz
 
 def parse_memory_limit(mem_str):
@@ -103,6 +105,7 @@ def pollard_strassen(N, B=None, max_memory=None):
             print(f"Memory limit allows L up to {L_mem_limit}. Current L={L} is safe.")
             
     print(f"Final L (step size) = {L}")
+    print(f"Largest factor findable ~ L^2 = {L**2}")
     
     # Safety check for very small N
     if N_val <= 1000:
@@ -213,6 +216,7 @@ if __name__ == "__main__":
     parser.add_argument("N", type=str, help="The integer to factor")
     parser.add_argument("--bound", "-B", type=str, help="Search for factors up to this bound (e.g., 1000000)")
     parser.add_argument("--max-memory", "-M", type=str, help="Approximate max memory usage (e.g., '1GB', '512MB')")
+    parser.add_argument("--free-ram-percent", type=float, default=10.0, help="Percentage of total RAM to leave free (default: 10). Set to 0 to disable.")
     
     args = parser.parse_args()
     
@@ -228,7 +232,24 @@ if __name__ == "__main__":
         max_mem_bytes = None
         if args.max_memory:
             max_mem_bytes = parse_memory_limit(args.max_memory)
+
+        # Calculate limit from free-ram-percent
+        if args.free_ram_percent > 0:
+            vm = psutil.virtual_memory()
+            # (total RAM) * (1 - percent/100) - (currently used RAM)
+            # This represents the remaining budget we can consume.
+            target_utilization = vm.total * (1 - args.free_ram_percent / 100.0)
+            calculated_limit = int(target_utilization - vm.used)
             
+            if calculated_limit <= 0:
+                print(f"Warning: System memory usage is already above the safety threshold (keeping {args.free_ram_percent}% free).")
+                calculated_limit = 1 # Force strict limit in function
+            
+            if max_mem_bytes is not None:
+                max_mem_bytes = min(max_mem_bytes, calculated_limit)
+            else:
+                max_mem_bytes = calculated_limit
+
         result = pollard_strassen(target, B=bound, max_memory=max_mem_bytes)
         
         if result:
@@ -237,8 +258,8 @@ if __name__ == "__main__":
         else:
             print("No factor found within the search range.")
             
-        except ValueError as e:
-            print(f"Error: {e}")        
+    except ValueError as e:
+        print(f"Error: {e}")        
     # Report Peak Memory
     usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     print(f"Peak Memory Usage: {usage_kb / 1024:.2f} MB")
