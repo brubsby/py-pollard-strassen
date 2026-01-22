@@ -1,32 +1,5 @@
-import sys
 import math
-import argparse
-import resource
-import psutil
 from flint import fmpz_mod_poly_ctx, fmpz
-
-def parse_memory_limit(mem_str):
-    """
-    Parses a memory string (e.g., '1GB', '500M') into bytes.
-    """
-    if not mem_str:
-        return None
-    
-    mem_str = mem_str.upper().strip()
-    units = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
-    
-    multiplier = 1
-    for unit, value in units.items():
-        if mem_str.endswith(unit) or mem_str.endswith(unit + "B"):
-            multiplier = value
-            # Remove unit suffix
-            mem_str = mem_str.rstrip("B").rstrip(unit)
-            break
-            
-    try:
-        return int(float(mem_str) * multiplier)
-    except ValueError:
-        raise ValueError(f"Invalid memory format: {mem_str}")
 
 def product_tree(leaves):
     """
@@ -47,6 +20,28 @@ def product_tree(leaves):
     right = product_tree(leaves[mid:])
     
     return left * right
+
+def get_memory_cost_params(N):
+    """
+    Returns (fixed_overhead_bytes, cost_per_L_bytes) for memory estimation.
+    """
+    try:
+        N_int = int(N)
+    except:
+        # Fallback for very large numbers passed as strings or other types
+        N_int = int(str(N))
+
+    N_bytes = N_int.bit_length() // 8
+    
+    # Heuristic: 
+    # Base Python/FLINT overhead is approx 20-25MB.
+    # Per-leaf cost is approx 3.1-3.4KB (scaling factor 8x).
+    FIXED_OVERHEAD = 25 * 1024 * 1024 # 25 MB
+    
+    base_cost = 256 + (4 * N_bytes)
+    cost_per_L = base_cost * 8
+    
+    return FIXED_OVERHEAD, cost_per_L
 
 def pollard_strassen(N, B=None, max_memory=None):
     """
@@ -80,10 +75,7 @@ def pollard_strassen(N, B=None, max_memory=None):
 
     # Apply Memory Constraints
     if max_memory:
-        # Heuristic: 
-        # Base Python/FLINT overhead is approx 20-25MB.
-        # Per-leaf cost is approx 3.1-3.4KB (scaling factor 8x).
-        FIXED_OVERHEAD = 25 * 1024 * 1024 # 25 MB
+        FIXED_OVERHEAD, cost_per_L = get_memory_cost_params(N_int)
         
         available_memory = max_memory - FIXED_OVERHEAD
         if available_memory <= 0:
@@ -91,9 +83,6 @@ def pollard_strassen(N, B=None, max_memory=None):
             print("Setting minimal L=1000. Expect memory usage > limit.")
             L_mem_limit = 1000
         else:
-            N_bytes = N_int.bit_length() // 8
-            base_cost = 256 + (4 * N_bytes)
-            cost_per_L = base_cost * 8
             L_mem_limit = int(available_memory // cost_per_L)
             
         print(f"Memory limit {max_memory} bytes (usable: {max(0, available_memory)}) implies max L approx {L_mem_limit}")
@@ -210,56 +199,3 @@ def pollard_strassen(N, B=None, max_memory=None):
         return None
     else:
         return None
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Factor large integers using Pollard-Strassen.")
-    parser.add_argument("N", type=str, help="The integer to factor")
-    parser.add_argument("--bound", "-B", type=str, help="Search for factors up to this bound (e.g., 1000000)")
-    parser.add_argument("--max-memory", "-M", type=str, help="Approximate max memory usage (e.g., '1GB', '512MB')")
-    parser.add_argument("--free-ram-percent", type=float, default=10.0, help="Percentage of total RAM to leave free (default: 10). Set to 0 to disable.")
-    
-    args = parser.parse_args()
-    
-    try:
-        # Check if N is decimal or hex/other
-        N_str = args.N
-        target = int(N_str)
-        
-        bound = None
-        if args.bound:
-            bound = int(args.bound)
-            
-        max_mem_bytes = None
-        if args.max_memory:
-            max_mem_bytes = parse_memory_limit(args.max_memory)
-
-        # Calculate limit from free-ram-percent
-        if args.free_ram_percent > 0:
-            vm = psutil.virtual_memory()
-            # (total RAM) * (1 - percent/100) - (currently used RAM)
-            # This represents the remaining budget we can consume.
-            target_utilization = vm.total * (1 - args.free_ram_percent / 100.0)
-            calculated_limit = int(target_utilization - vm.used)
-            
-            if calculated_limit <= 0:
-                print(f"Warning: System memory usage is already above the safety threshold (keeping {args.free_ram_percent}% free).")
-                calculated_limit = 1 # Force strict limit in function
-            
-            if max_mem_bytes is not None:
-                max_mem_bytes = min(max_mem_bytes, calculated_limit)
-            else:
-                max_mem_bytes = calculated_limit
-
-        result = pollard_strassen(target, B=bound, max_memory=max_mem_bytes)
-        
-        if result:
-            print(f"Found factor: {result}")
-            print(f"Complement: {target // result}")
-        else:
-            print("No factor found within the search range.")
-            
-    except ValueError as e:
-        print(f"Error: {e}")        
-    # Report Peak Memory
-    usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    print(f"Peak Memory Usage: {usage_kb / 1024:.2f} MB")
